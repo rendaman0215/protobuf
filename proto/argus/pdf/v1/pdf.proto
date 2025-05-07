@@ -1,0 +1,26 @@
+syntax = "proto3";
+package argus.pdf.v1;
+
+// PDFのデータ
+message PDF {
+  string title = 1;
+  string text = 2;
+}
+
+
+// PDFのリクエスト
+message GetPDFRequest {
+  // PDFのデータ
+  PDF pdf = 1;
+}
+
+// PDFのレスポンス
+message GetPDFResponse {
+  string stauts = 1;
+}
+
+//  PDFのサービス
+service PDFService {
+  // PDFを取得する
+  rpc GetPDF (GetPDFRequest) returns (GetPDFResponse);
+}

@@ -1,0 +1,10 @@
+version: v1
+managed:
+  enabled: true
+plugins:
+  # ===== protobuf messages =====
+  - plugin: buf.build/protocolbuffers/java:v21.7
+    out: gen/java
+  # ===== gRPC service stubs =====
+  - plugin: buf.build/grpc/java:v1.54.1
+    out: gen/java
