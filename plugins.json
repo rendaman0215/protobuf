@@ -23,7 +23,7 @@
     "buf.build/bufbuild/connect-es": [
       "v0.8.6"
     ],
-    " buf.build/bufbuild/es:": [
+    "buf.build/bufbuild/es:": [
       "v1.2.0"
     ]
   }
