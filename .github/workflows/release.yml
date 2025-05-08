@@ -1,30 +1,34 @@
-name: Buf Generate & Commit SDKs
+name: Buf Generate, Commit & Publish SDKs
 
 on:
-  # proto 変更時のみトリガ
+  # proto ファイルに変更があったとき自動実行
   push:
     paths:
       - 'proto/**/*.proto'
-  # 手動起動
+  # 手動実行も許可
   workflow_dispatch:
 
 jobs:
-  generate-and-commit:
-    # bot が push したコミットでは再実行しない
+  generate-commit-publish:
     if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
+
+    env:
+      COMMIT_SHA: ${{ github.sha }}
+      SHORT_SHA:  ${{ github.sha }}
+      VERSION_TAG: 0.0.0-${{ github.sha }}  # 一意性確保用
 
     steps:
       # ───────── チェックアウト ─────────
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0              # push するので完全履歴を取得
+          fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
       # ───────── Buf CLI ─────────
       - uses: bufbuild/buf-setup-action@v1
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
+          version: 1.31.1
 
       # ───────── コード生成 ─────────
       - name: Generate Go SDK
@@ -36,7 +40,54 @@ jobs:
       - name: Generate TypeScript SDK
         run: buf generate --template buf.gen.typescript.yaml
 
-      # ───────── 変更をコミット ─────────
+      # ───────── Java パッケージ公開 ─────────
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Build & Publish Maven Package
+        run: |
+          SDK_DIR="sdk-java"
+          mkdir -p ${SDK_DIR}/src/main/java
+          cp -r gen/java/* ${SDK_DIR}/src/main/java/
+
+          cat > ${SDK_DIR}/pom.xml <<EOF
+          <project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+            <modelVersion>4.0.0</modelVersion>
+            <groupId>com.${{ github.repository_owner }}</groupId>
+            <artifactId>proto-sdk</artifactId>
+            <version>${VERSION_TAG}</version>
+            <packaging>jar</packaging>
+          </project>
+          EOF
+
+          cd ${SDK_DIR}
+          mvn -B --no-transfer-progress package
+          mvn -B --no-transfer-progress deploy \
+            -DaltDeploymentRepository=github::default::https://maven.pkg.github.com/${{ github.repository_owner }}/$(basename ${{ github.repository }}) \
+            -DskipTests
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ───────── npm パッケージ公開 ─────────
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://npm.pkg.github.com/
+
+      - name: Build & Publish npm Package
+        run: |
+          PACKAGE_DIR="gen/ts"
+          cd ${PACKAGE_DIR}
+          echo '{"name":"@'${{ github.repository_owner }}'/proto-sdk","version":"'${VERSION_TAG}'","main":"index.js","types":"index.d.ts"}' > package.json
+          npm publish --access restricted
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ───────── 生成物をコミット ─────────
       - name: Commit & push generated code
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -45,11 +96,9 @@ jobs:
           git config user.email "github-actions@users.noreply.github.com"
 
           git add gen/
-          # 変更があるかチェック
           if git diff --cached --quiet; then
             echo "✅ Generated code is up‑to‑date. No commit necessary." && exit 0
           fi
 
-          COMMIT_MSG="chore(proto): regenerate SDK from updated .proto [skip ci]"
-          git commit -m "$COMMIT_MSG"
+          git commit -m "chore(proto): regenerate SDK and publish packages [skip ci]"
           git push origin HEAD
