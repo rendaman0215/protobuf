@@ -1,193 +1,55 @@
-name: Generate & Publish Protobuf SDKs
+name: Buf Generate & Commit SDKs
 
 on:
-  # proto ファイルが変更されたら自動実行
+  # proto 変更時のみトリガ
   push:
     paths:
       - 'proto/**/*.proto'
-  # 手動トリガーも許可
+  # 手動起動
   workflow_dispatch:
 
-# ─────────────────────────────────────────────────────────────
-# 0️⃣  plugins.json → 言語別マトリクスを作成
-# ─────────────────────────────────────────────────────────────
-
 jobs:
-  build-matrix:
-    name: Build language matrices
+  generate-and-commit:
+    # bot が push したコミットでは再実行しない
+    if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
-    outputs:
-      go:   ${{ steps.set.outputs.go }}
-      java: ${{ steps.set.outputs.java }}
-      ts:   ${{ steps.set.outputs.ts }}
+
     steps:
+      # ───────── チェックアウト ─────────
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0              # push するので完全履歴を取得
+          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install jq
-        run: sudo apt-get update -y && sudo apt-get install -y jq
-
-      - id: set
-        run: |
-          echo "🧮  Generating matrices from plugins.json"
-
-          GO_MATRIX=$(jq -c '
-            .go as $g |
-            [$g["buf.build/protocolbuffers/go"][]  as $proto |
-             $g["buf.build/grpc/go"][]            as $grpc |
-             {GO_PROTO:$proto, GO_GRPC:$grpc}]' plugins.json)
-          echo "go=$GO_MATRIX"   >> "$GITHUB_OUTPUT"
-
-          JAVA_MATRIX=$(jq -c '
-            .java as $j |
-            [$j["buf.build/protocolbuffers/java"][] as $proto |
-             $j["buf.build/grpc/java"][]            as $grpc |
-             {JAVA_PROTO:$proto, JAVA_GRPC:$grpc}]' plugins.json)
-          echo "java=$JAVA_MATRIX" >> "$GITHUB_OUTPUT"
-
-          TS_MATRIX=$(jq -c '
-            .ts as $t |
-            [$t["buf.build/bufbuild/connect-es"][] as $connect |
-             $t["buf.build/bufbuild/es"][]          as $es |
-             {TS_CONNECT:$connect, TS_ES:$es}]' plugins.json)
-          echo "ts=$TS_MATRIX"   >> "$GITHUB_OUTPUT"
-
-  # ============================================================
-  # 1️⃣   Go SDK 生成
-  # ============================================================
-
-  go-sdk:
-    name: Go SDK
-    needs: build-matrix
-    if: needs.build-matrix.outputs.go != '[]'
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include: ${{ fromJson(needs.build-matrix.outputs.go) }}
-    steps:
-      - uses: actions/checkout@v4
-
+      # ───────── Buf CLI ─────────
       - uses: bufbuild/buf-setup-action@v1
         with:
           version: 1.31.1
 
-      - name: Install yq
-        run: sudo apt-get update && sudo apt-get install -y yq
-
-      - name: Patch buf.gen.go.yaml with matrix versions
-        run: |
-          cp buf.gen.go.yaml buf.gen.go.tmp.yaml
-          yq -i '(.plugins[] | select(.plugin|test("protocolbuffers/go"))).plugin = "buf.build/protocolbuffers/go:${{ matrix.GO_PROTO }}"' buf.gen.go.tmp.yaml
-          yq -i '(.plugins[] | select(.plugin|test("grpc/go"))).plugin           = "buf.build/grpc/go:${{ matrix.GO_GRPC }}"'            buf.gen.go.tmp.yaml
-
+      # ───────── コード生成 ─────────
       - name: Generate Go SDK
-        run: buf generate --template buf.gen.go.tmp.yaml
-
-      - name: Package & Publish (Release asset)
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          VERSION="go-${{ matrix.GO_PROTO }}-${{ matrix.GO_GRPC }}-${GITHUB_SHA::7}"
-          tar -C gen -czf proto-sdk-${VERSION}.tgz go
-          gh release create "$VERSION" proto-sdk-${VERSION}.tgz -t "$VERSION" -n "Go SDK generated with protoc ${{ matrix.GO_PROTO }} & grpc ${{ matrix.GO_GRPC }}" || \
-          gh release upload "$VERSION" proto-sdk-${VERSION}.tgz --clobber
-
-  # ============================================================
-  # 2️⃣   Java SDK 生成
-  # ============================================================
-
-  java-sdk:
-    name: Java SDK
-    needs: build-matrix
-    if: needs.build-matrix.outputs.java != '[]'
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include: ${{ fromJson(needs.build-matrix.outputs.java) }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: bufbuild/buf-setup-action@v1
-        with:
-          version: 1.31.1
-
-      - name: Install yq & Maven
-        run: sudo apt-get update && sudo apt-get install -y yq maven
-
-      - name: Patch buf.gen.java.yaml with matrix versions
-        run: |
-          cp buf.gen.java.yaml buf.gen.java.tmp.yaml
-          yq -i '(.plugins[] | select(.plugin|test("protocolbuffers/java"))).plugin = "buf.build/protocolbuffers/java:${{ matrix.JAVA_PROTO }}"' buf.gen.java.tmp.yaml
-          yq -i '(.plugins[] | select(.plugin|test("grpc/java"))).plugin           = "buf.build/grpc/java:${{ matrix.JAVA_GRPC }}"'            buf.gen.java.tmp.yaml
+        run: buf generate --template buf.gen.go.yaml
 
       - name: Generate Java SDK
-        run: buf generate --template buf.gen.java.tmp.yaml
+        run: buf generate --template buf.gen.java.yaml
 
-      - name: Build & Deploy JAR to GitHub Packages (Maven)
+      - name: Generate TypeScript SDK
+        run: buf generate --template buf.gen.typescript.yaml
+
+      # ───────── 変更をコミット ─────────
+      - name: Commit & push generated code
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          VERSION="java-${{ matrix.JAVA_PROTO }}-${{ matrix.JAVA_GRPC }}-${GITHUB_SHA::7}"
-          mkdir -p sdk-java/src/main/java
-          cp -r gen/java/* sdk-java/src/main/java/
-          cat > sdk-java/pom.xml <<EOF
-          <project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
-            <modelVersion>4.0.0</modelVersion>
-            <groupId>com.${{ github.repository_owner }}</groupId>
-            <artifactId>proto-sdk</artifactId>
-            <version>${VERSION}</version>
-            <packaging>jar</packaging>
-          </project>
-          EOF
-          cd sdk-java
-          mvn -B --no-transfer-progress package
-          mvn -B --no-transfer-progress deploy \
-            -DaltDeploymentRepository=github::default::https://maven.pkg.github.com/${{ github.repository_owner }}/protobuf \
-            -DskipTests
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions@users.noreply.github.com"
 
-  # ============================================================
-  # 3️⃣   TypeScript SDK 生成
-  # ============================================================
+          git add gen/
+          # 変更があるかチェック
+          if git diff --cached --quiet; then
+            echo "✅ Generated code is up‑to‑date. No commit necessary." && exit 0
+          fi
 
-  ts-sdk:
-    name: TypeScript SDK
-    needs: build-matrix
-    if: needs.build-matrix.outputs.ts != '[]'
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include: ${{ fromJson(needs.build-matrix.outputs.ts) }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: bufbuild/buf-setup-action@v1
-        with:
-          version: 1.31.1
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          registry-url: https://npm.pkg.github.com/
-
-      - name: Install yq
-        run: sudo apt-get update && sudo apt-get install -y yq
-
-      - name: Patch buf.gen.typescript.yaml with matrix versions
-        run: |
-          cp buf.gen.typescript.yaml buf.gen.ts.tmp.yaml
-          yq -i '(.plugins[] | select(.plugin|test("connect-es"))).plugin = "buf.build/bufbuild/connect-es:${{ matrix.TS_CONNECT }}"' buf.gen.ts.tmp.yaml
-          yq -i '(.plugins[] | select(.plugin|test("[^-]es$"))).plugin         = "buf.build/bufbuild/es:${{ matrix.TS_ES }}"'          buf.gen.ts.tmp.yaml
-
-      - name: Generate TypeScript SDK
-        run: buf generate --template buf.gen.ts.tmp.yaml
-
-      - name: Publish to GitHub Packages (npm)
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          VERSION="ts-${{ matrix.TS_CONNECT }}-${{ matrix.TS_ES }}-${GITHUB_SHA::7}"
-          cd gen/ts
-          echo '{"name":"@${{ github.repository_owner }}/proto-sdk","version":"'${VERSION}'","main":"index.js","types":"index.d.ts"}' > package.json
-          npm publish --access restricted
+          COMMIT_MSG="chore(proto): regenerate SDK from updated .proto [skip ci]"
+          git commit -m "$COMMIT_MSG"
+          git push origin HEAD
